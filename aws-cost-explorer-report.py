@@ -4,28 +4,29 @@ import boto3
 import click
 
 from calendar import monthrange
-from datetime import datetime
+import datetime
+from dateutil.relativedelta import relativedelta
 from prettytable import PrettyTable
 
 # define table layout
 pt = PrettyTable()
 
 pt.field_names = [
-    'TimePeriodStart',
-    'LinkedAccount',
-    'Service',
-    'Amount',
+    'Account ID',
+    'Account Name',
+    'Unblended Cost',
+    'Blended Cost',
 ]
 
 pt.align = "l"
 pt.align["Amount"] = "r"
 
 
-def get_cost_and_usage(bclient: object, start: str, end: str) -> list:
+def get_cost_and_usage(ce_client: object, start: str, end: str) -> list:
     cu = []
 
     while True:
-        data = bclient.get_cost_and_usage(
+        data = ce_client.get_cost_and_usage(
             TimePeriod={
                 'Start': start,
                 'End':  end,
@@ -33,15 +34,12 @@ def get_cost_and_usage(bclient: object, start: str, end: str) -> list:
             Granularity='MONTHLY',
             Metrics=[
                 'UnblendedCost',
+                'BlendedCost'
             ],
             GroupBy=[
                 {
                     'Type': 'DIMENSION',
                     'Key': 'LINKED_ACCOUNT',
-                },
-                {
-                    'Type': 'DIMENSION',
-                    'Key': 'SERVICE',
                 }
             ],
         )
@@ -55,46 +53,48 @@ def get_cost_and_usage(bclient: object, start: str, end: str) -> list:
     return cu
 
 
-def fill_table_content(results: list, start: str, end: str) -> None:
-    total = 0
+def fill_table_content(results: list, org_client: object) -> None:
+    unblended_cost_total = 0
+    blended_cost_total = 0
     for result_by_time in results:
         for group in result_by_time['Groups']:
-            amount = float(group['Metrics']['UnblendedCost']['Amount'])
+            unblended_cost = float(group['Metrics']['UnblendedCost']['Amount'])
+            blended_cost = float(group['Metrics']['BlendedCost']['Amount'])
 
-            total += amount
-            # Skip, if total amount less then 0.00001 USD
-            if amount < 0.00001:
-                continue
+            unblended_cost_total += unblended_cost
+            blended_cost_total += blended_cost
+
+            account_id = group['Keys'][0]
+
+            account_name = org_client.describe_account(AccountId=account_id)['Account']['Name']
 
             pt.add_row([
-                result_by_time['TimePeriod']['Start'],
-                group['Keys'][0],
-                group['Keys'][1],
-                format(amount, '0.5f'),
+                account_id,
+                account_name,
+                unblended_cost,
+                blended_cost,
             ])
-    print("Total: {:5f}".format(total))
+    print("Unblended Cost Total: {}".format(unblended_cost_total))
+    print("Blended Cost Total: {}".format(blended_cost_total))
 
 
 @click.command()
-@click.option('-P', '--profile', help='profile name')
 @click.option('-S', '--start', help='start date (default: 1st date of current month)')
 @click.option('-E', '--end', help='end date (default: last date of current month)')
-def report(profile: str, start: str, end: str) -> None:
-    # set start/end to current month if not specify
+def report(start: str, end: str) -> None:
+    # set start/end to last month if not specify
     if not start or not end:
-        # get last day of month by `monthrange()`
-        # ref: https://stackoverflow.com/a/43663
-        ldom = monthrange(datetime.today().year, datetime.today().month)[1]
-
-        start = datetime.today().replace(day=1).strftime('%Y-%m-%d')
-        end = datetime.today().replace(day=ldom).strftime('%Y-%m-%d')
+        start = (datetime.date.today() - relativedelta(months=+1)).replace(day=1).strftime('%Y-%m-%d')  # 1st day of month a month ago
+        end = datetime.date.today().replace(day=1).strftime('%Y-%m-%d')
 
     # cost explorer
-    SERVICE_NAME = 'ce'
-    bclient = boto3.Session(profile_name=profile).client(SERVICE_NAME)
+    ce_client = boto3.client('ce')
 
-    results = get_cost_and_usage(bclient, start, end)
-    fill_table_content(results, start, end)
+    # organizations
+    org_client = boto3.client('organizations')
+
+    results = get_cost_and_usage(ce_client, start, end)
+    fill_table_content(results, org_client)
 
     print(pt)
 
